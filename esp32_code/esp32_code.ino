@@ -2,6 +2,7 @@
 #include <WiFiUdp.h>
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps612.h"
+#include <Adafruit_PWMServoDriver.h>
 #include "Wire.h"
 
 const char* ssid = "LB_ADSL_TUDS";
@@ -10,8 +11,15 @@ const unsigned int port = 1234; // Port number
 const unsigned long receiveTimeout = 800; // Timeout in milliseconds
 IPAddress remoteip;
 
-WiFiUDP udp;
-MPU6050   mpu;
+#define SERVOMIN  135 // This is the 'minimum' pulse length count (out of 4096)
+#define SERVOMAX  300 // This is the 'maximum' pulse length count (out of 4096)
+#define SERVO_FREQ 50 // Analog servos run at ~50 Hz updates
+
+#define K 10
+
+WiFiUDP                 udp;
+MPU6050                 mpu;
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
 // MPU control/status vars
 bool dmpReady = false;  // set true if DMP init was successful
@@ -61,6 +69,16 @@ uint8_t responseBuffer[responseBufferSize];
 
 bool connected = false; // Flag to track Wi-Fi connection status
 
+const float g = 9.80665;   //[m/s^2]
+const float m = 0.6;        //[kg]
+const float cm= 5;          //[]
+const float i = 0;          //[kg*m^2]
+const float iz= 0;          //[kg*m^2]
+const float l = 0;          //[m]
+const float a = m/(4*cm);   //[]
+const float b = i/(2*l*cm); //[]
+const float c = iz/(4*l*b);
+
 void connectToWiFi(const char *ssid, const char *pwd) {
   Serial.println("Connecting to WiFi network: " + String(ssid));
   // delete old config
@@ -96,12 +114,19 @@ void setup() {
   Serial.begin(115200);
   connectToWiFi(ssid, password);
 
+  Serial.println(F("Initializing I2C devices..."));
   Wire.begin();
   Wire.setClock(400000);
-  Serial.println(F("Initializing I2C devices..."));
+
+  Serial.println(F("Initializing PCA9668 devices..."));
+  pwm.begin();
+  pwm.setOscillatorFrequency(27000000);
+  pwm.setPWMFreq(SERVO_FREQ);
+
+  Serial.println(F("Initializing MPU6050 devices..."));
   mpu.initialize();
 
-  Serial.println(F("Testing device connections..."));
+  Serial.println(F("Testing MPU6050 connections..."));
   Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
 
   // load and configure the DMP
@@ -119,9 +144,9 @@ void setup() {
     // make sure it worked (returns 0 if so)
   if (devStatus == 0) {
     // Calibration Time: generate offsets and calibrate our MPU6050
-    mpu.CalibrateAccel(6);
-    mpu.CalibrateGyro(6);
-    Serial.println();
+    /*mpu.CalibrateAccel(6);
+    mpu.CalibrateGyro(6);*/
+    Serial.println("init ok");
     mpu.PrintActiveOffsets();
     // turn on the DMP, now that it's ready
     Serial.println(F("Enabling DMP..."));
@@ -146,6 +171,13 @@ void setup() {
 
   while(!connected) {
     delay(200);
+  }
+  for(int i = 130; i < 600; i++) {
+    delay(333);
+    pwm.setPWM(14,  0, i + 1);
+    pwm.setPWM(12,  0, i + 54);
+    pwm.setPWM(10,  0, i + 44);
+    pwm.setPWM(8,   0, i );
   }
   Serial.println("wait to connect");
   int size = 0;
@@ -172,6 +204,7 @@ void loop() {
     delay(9000);
     return;
   }
+
   if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) { // Get the Latest packet
     float ypr[3];
     Quaternion  q;
