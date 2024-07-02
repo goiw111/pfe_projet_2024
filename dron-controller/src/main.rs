@@ -11,6 +11,7 @@ use bevy::input::gamepad::GamepadButtonChangedEvent;
 use gilrs::{Gilrs, Button, Event};
 use std::sync::Mutex;
 use gilrs::EventType;
+use crate::egui::DragValue;
 
 #[derive(Debug, PartialEq)]
 enum State {
@@ -39,7 +40,7 @@ struct Controller {
 }
 
 #[derive(Component,Debug)]
-struct Buffer(String,String);
+struct Buffer(String,String,u16,f32,f32,f32);
 
 #[derive(Resource)]
 struct EvHand {
@@ -58,15 +59,28 @@ fn main() {
         .run();
 }
 
-fn representation() {
-    
-}
-
-fn sync_state(mut query:  Query<(&mut Controller,&mut Transform)>) {
+fn sync_state(mut query:  Query<(&mut Controller,&mut Transform)>,buffer: Query<&mut Buffer>) {
+    let buffer = buffer.get_single().unwrap();
     if let Ok((mut c,mut t)) = query.get_single_mut() {
         if c.addr.is_none() { return () }
         if c.wheneblock == 0 {
-            let mut TX_BUFF = [0;4];
+            let mut TX_BUFF = [0;18];
+            let f = buffer.2.to_le_bytes();
+            let am = buffer.4.to_le_bytes();
+            let ap = buffer.5.to_le_bytes();
+            let m = buffer.3.to_le_bytes();
+            for i in 0..4  {
+                TX_BUFF[4 + i] = m[i];
+            }
+            for i in 0..4  {
+                TX_BUFF[8 + i] = am[i];
+            }
+            for i in 0..4  {
+                TX_BUFF[12 + i] = ap[i];
+            }
+            for i in 0..2  {
+                TX_BUFF[16 + i] = f[i];
+            }
             if c.boot {
                 TX_BUFF[0] = TXMsg::Command as u8;
                 // set commands
@@ -74,6 +88,7 @@ fn sync_state(mut query:  Query<(&mut Controller,&mut Transform)>) {
                 TX_BUFF[2] = c.command[1].to_be_bytes()[0];
                 TX_BUFF[3] = c.command[2].to_be_bytes()[0];
             }
+            //println!("{:?}",TX_BUFF);
             match c.state {
                 State::Booted => {
                     if !c.boot  {
@@ -97,7 +112,7 @@ fn sync_state(mut query:  Query<(&mut Controller,&mut Transform)>) {
                             let y = f32::from_ne_bytes(rest[4..8].try_into().unwrap());
                             let x = f32::from_ne_bytes(rest[8..].try_into().unwrap());
                             t.rotation = Quat::from_scaled_axis([-1.0 * y,-1.0 * z,x].into());
-                            println!("x: {},y: {},z: {}",x,y,z);
+                            //println!("x: {},y: {},z: {}",x,y,z);
                         },
                         _ => (),
                     }
@@ -179,7 +194,7 @@ fn init(mut commands: Commands, asset_server: Res<AssetServer>) {
         transform: Transform::from_xyz(0.0, 0.0, 0.0),
         ..default()
     }));
-    commands.spawn(Buffer(String::new(),String::new()));
+    commands.spawn(Buffer(String::new(),String::new(),300,0.1,6.0,0.12247));
     commands.spawn(Camera3dBundle {
         transform: Transform::from_xyz(-5.0, 2.0, 0.0)
             .looking_at(0.0 * Vec3::Y, Vec3::Y),
@@ -216,6 +231,22 @@ fn ui_system(mut contexts: EguiContexts, mut query: Query<&mut Controller>, mut 
                     }
                 }
                 ui.label(buffer.1.clone());
+                ui.horizontal(|ui| {
+                    ui.label("force Thrust");
+                    ui.add(DragValue::new(&mut buffer.2));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("motor mass");
+                    ui.add(DragValue::new(&mut buffer.3).speed(0.001).clamp_range(0.075..=0.12));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("coefficient d'amortissement");
+                    ui.add(DragValue::new(&mut buffer.4).speed(0.005).clamp_range(0..=6));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("La pulsation propre ");
+                    ui.add(DragValue::new(&mut buffer.5).speed(0.001).clamp_range(0.0..=0.5));
+                });
             }
         });
     });

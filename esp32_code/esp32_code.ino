@@ -8,14 +8,10 @@
 const char* ssid = "LB_ADSL_TUDS";
 const char* password = "chahmot4ever";
 const unsigned int port = 1234; // Port number
-const unsigned long receiveTimeout = 800; // Timeout in milliseconds
+const unsigned long receiveTimeout = 400; // Timeout in milliseconds
 IPAddress remoteip;
 
-#define SERVOMIN  135 // This is the 'minimum' pulse length count (out of 4096)
-#define SERVOMAX  300 // This is the 'maximum' pulse length count (out of 4096)
-#define SERVO_FREQ 50 // Analog servos run at ~50 Hz updates
-
-#define K 10
+#define SERVO_FREQ 44 // Analog servos run at ~50 Hz updates
 
 WiFiUDP                 udp;
 MPU6050                 mpu;
@@ -28,8 +24,6 @@ uint8_t devStatus;      // return status after each device operation (0 = succes
 uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
 uint16_t fifoCount;     // count of all bytes currently in FIFO
 uint8_t fifoBuffer[64]; // FIFO storage buffer
-
-bool boot = 0;
 
 typedef enum _state { 
   INIT    = 0x00,
@@ -62,22 +56,82 @@ typedef struct _cdata {
   int8_t x,y,z;
 } CData;
 
-CData cmd = CData {   0,   0,   0 };
+const float g = 9.80665;        //[m/s^2]
+CData cmd = CData {   0,   0,   -127 };
 
 const size_t responseBufferSize = 20; // Size of the response buffer
 uint8_t responseBuffer[responseBufferSize];
 
 bool connected = false; // Flag to track Wi-Fi connection status
 
-const float g = 9.80665;   //[m/s^2]
-const float m = 0.6;        //[kg]
-const float cm= 5;          //[]
-const float i = 0;          //[kg*m^2]
-const float iz= 0;          //[kg*m^2]
-const float l = 0;          //[m]
-const float a = m/(4*cm);   //[]
-const float b = i/(2*l*cm); //[]
-const float c = iz/(4*l*b);
+const float m = 0.673;          //[kg]
+const float l = 0.22;              //[m]
+const float r = 0.065;
+const float cos_a = cos(PI/4 - 0.01);
+const float sin_a = sin(PI/4 - 0.01);
+
+struct rx_data {
+  uint8_t   key;
+  uint8_t   cmd_x;
+  uint8_t   cmd_y;
+  uint8_t   cmd_z;
+  float     m_mass;
+  float     c_amorti;
+  float     p_propre;
+  uint16_t  thrust;
+};
+
+union{
+  struct  rx_data data;
+  uint8_t         bytes[18];
+} RX_DATA;
+
+float * control(float z_dd,float cos_th,float * err) {
+  const float     ms= RX_DATA.data.m_mass;
+  const uint16_t  th= RX_DATA.data.thrust;
+  const float cm= (m*g)/(th*4);
+  const float i = (2/5)*(m - 4*ms)*r*r + 2*l*l*ms;   //[kg*m^2]
+  const float iz= (2/5)*(m - 4*ms)*r*r + 4*l*l*ms;   //[kg*m^2]
+  const float a = m/(4*cm);                          //[]
+  const float b = i/(2*l*cm);                         //[]
+  const float d = cm*0.8;
+  const float c = iz/(4*l*d);                         //[]
+
+  static float  r[4];
+  r[0] = a*(g + z_dd)/cos_th + b*(err[0]*sin_a - err[1]*cos_a) + c*err[2];
+  r[1] = a*(g + z_dd)/cos_th + b*(err[0]*cos_a + err[1]*sin_a) - c*err[2];
+  r[2] = a*(g + z_dd)/cos_th - b*(err[0]*sin_a - err[1]*cos_a) + c*err[2];
+  r[3] = a*(g + z_dd)/cos_th - b*(err[0]*cos_a + err[1]*sin_a) - c*err[2];
+  return r;
+}
+
+unsigned long pt;
+float         i_x,i_y   = 0;
+float         perr[3]   = { 0 };
+
+float * pid(float * err) {
+  static float  r[3];
+  const float   amo = RX_DATA.data.c_amorti;
+  const float   ppr = RX_DATA.data.p_propre;
+
+  unsigned long time = millis();
+  float et = (time - pt) / 1000.0;
+  i_x += err[0] * et;
+  i_y += err[1] * et;
+  Serial.println( ppr * ppr * i_x);
+
+  float z_d = 0.24875;
+  r[0]  = 10*(2*ppr*amo*err[0] + (err[0] - perr[0]) / et + ppr*ppr*i_x);
+  Serial.println(r[0]);
+  r[1]  = 10*(2*ppr*amo*err[1] + (err[1] - perr[1]) / et + ppr*ppr*i_y);
+  r[2]  = 0 /*err[2] + z_d*(err[2] - perr[2]) / et*/;
+  perr[0] = err[0];
+  perr[1] = err[1];
+  perr[2] = err[2];
+
+  pt = time;
+  return r;
+}
 
 void connectToWiFi(const char *ssid, const char *pwd) {
   Serial.println("Connecting to WiFi network: " + String(ssid));
@@ -122,6 +176,8 @@ void setup() {
   pwm.begin();
   pwm.setOscillatorFrequency(27000000);
   pwm.setPWMFreq(SERVO_FREQ);
+  pwm.setPWM(12,  0, 0 );
+  pwm.setPWM(10,  0, 0 );
 
   Serial.println(F("Initializing MPU6050 devices..."));
   mpu.initialize();
@@ -144,8 +200,8 @@ void setup() {
     // make sure it worked (returns 0 if so)
   if (devStatus == 0) {
     // Calibration Time: generate offsets and calibrate our MPU6050
-    /*mpu.CalibrateAccel(6);
-    mpu.CalibrateGyro(6);*/
+    mpu.CalibrateAccel(6);
+    mpu.CalibrateGyro(6);
     Serial.println("init ok");
     mpu.PrintActiveOffsets();
     // turn on the DMP, now that it's ready
@@ -172,13 +228,17 @@ void setup() {
   while(!connected) {
     delay(200);
   }
-  for(int i = 130; i < 600; i++) {
-    delay(333);
-    pwm.setPWM(14,  0, i + 1);
-    pwm.setPWM(12,  0, i + 54);
-    pwm.setPWM(10,  0, i + 44);
-    pwm.setPWM(8,   0, i );
+  /*for(int i = 150; i < 160; i++) {
+    delay(1000);
+    pwm.setPWM(14,  0,29 + i ); //+19
+    pwm.setPWM(12,  0, i );
+    pwm.setPWM(10,  0, i );
+    pwm.setPWM(8,   0, i ); //+29
+    Serial.print("power: ");
+    Serial.println(i);
   }
+  delay(2000);*/
+
   Serial.println("wait to connect");
   int size = 0;
   while(!size) {
@@ -216,17 +276,34 @@ void loop() {
     data.p = ypr[1];
     data.r = ypr[2];
   }
+  float xyz[3] = { -1 * data.r , data.p, -1 * data.y };
+  Serial.printf("x: %.2f, y: %.2f ,z: %.2f \n",data.r, data.p,data.y);
+  float * cxyz = { 0 };
+  cxyz = pid(xyz);
+  float * w = control( cmd.z * (g/127) ,1,cxyz);
+
+  //Serial.printf("w1: %.2f, w2: %.2f, w3: %.2f, w4: %.2f \n",w[0],w[1],w[2],w[3]);
+
+  pwm.setPWM(12,  0, 0 +  w[3] );
+  pwm.setPWM(10,  0, 0 +  w[1] );
+  pwm.setPWM(8,   0, 0 +  w[0] );
+  pwm.setPWM(14,  0, 0 +  w[2] );
+
   if (connected) {
     // Receive data with timeout
     unsigned long startTime = millis();
     int packetSize;
-    char RX_DATA[4];
     do {
       udp.parsePacket();
-      int len = udp.read(RX_DATA, 4);
+      int len = udp.read(RX_DATA.bytes, 18);
+      /*Serial.printf("[%d",RX_DATA.bytes[0]);
+      for(int loop = 1; loop < 18; loop++)
+      Serial.printf(",%d ", RX_DATA.bytes[loop]);
+      Serial.println("]");*/
+
       udp.beginPacket();
 
-      switch(RX_DATA[0]) {
+      switch(RX_DATA.data.key) {
         case BOOT_ON:
           state = BOOT;
         break;
@@ -236,26 +313,22 @@ void loop() {
       }
       udp.write(state);
       if (state == BOOT) {
-        cmd.x = (int8_t)RX_DATA[1];
-        cmd.y = (int8_t)RX_DATA[2];
-        cmd.z = (int8_t)RX_DATA[3];
-        //Serial.printf("x: %.2f ,y: %.2f,z: %.2f \n",data.r,data.p,data.y);
+        cmd.x = RX_DATA.data.cmd_x;
+        cmd.y = RX_DATA.data.cmd_y;
+        cmd.z = RX_DATA.data.cmd_z;
         udp.write((uint8_t *)&data, 12);
       }
       udp.endPacket();
-      delay(20);
-      if( len > 0) {
+      delay(25);
+      //if( len > 0) {
         break;
-      }
+      //}
       // Resend the response buffer to the remote IP and port
     } while (millis() - startTime < receiveTimeout);
 
     if (millis() - startTime >= receiveTimeout) {
       Serial.println("Receive timeout");
-      cmd.x = 0; cmd.y = 0; cmd.z = 0;
+      cmd.x = 0; cmd.y = 0; cmd.z = -127;
     }
-  }
-  if (cmd.x != 0 | cmd.y != 0 | cmd.z != 0) {
-    Serial.printf("x: %d,y: %d,z: %d \n",cmd.x,cmd.y,cmd.z);
   }
 }
